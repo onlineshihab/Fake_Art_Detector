@@ -2860,4 +2860,7 @@ with gr.Blocks(
 demo.queue(default_concurrency_limit=1, max_size=8)
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(
+    server_name="0.0.0.0",
+    server_port=7860
+)
