@@ -1,3 +1,5 @@
+streamlit==1.28.1
+streamlit-option-menu==0.3.2
 transformers==4.46.3
 peft==0.13.2
 accelerate==1.1.1
@@ -11,5 +13,3 @@ Pillow==10.4.0
 sentencepiece==0.2.0
 safetensors==0.4.5
 protobuf>=4.25,<6
-
-streamlit==1.62.0
