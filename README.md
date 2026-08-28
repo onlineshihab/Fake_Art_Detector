@@ -1,1 +1,0 @@
-# Fake_Art_Detector
