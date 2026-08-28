@@ -1,5 +1,7 @@
+# Streamlit-compatible FakeArt Detector
 from __future__ import annotations
 
+import streamlit as st
 import json
 import os
 import re
@@ -9,11 +11,13 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+class PredictionError(Exception):
+    pass
+
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import cv2
-import gradio as gr
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -155,7 +159,7 @@ def get_model_device(model: Any) -> torch.device:
 
 def ensure_rgb(image: Image.Image) -> Image.Image:
     if image is None:
-        raise gr.Error("Please upload an artwork image first.")
+        raise PredictionError("Please upload an artwork image first.")
     return image.convert("RGB")
 
 
@@ -536,7 +540,7 @@ def run_prediction(
     user_description: str,
 ) -> tuple[str, str, str, str, str, dict[str, Any]]:
     if image is None:
-        raise gr.Error("Please upload an artwork image first.")
+        raise PredictionError("Please upload an artwork image first.")
 
     try:
         with _INFERENCE_LOCK:
@@ -629,11 +633,11 @@ def run_prediction(
             reasons_output,
             technical,
         )
-    except gr.Error:
+    except PredictionError:
         raise
     except Exception as error:
         traceback.print_exc()
-        raise gr.Error(f"Prediction failed: {error}") from error
+        raise PredictionError(f"Prediction failed: {error}") from error
 
 def clear_outputs() -> tuple[
     None,
@@ -734,7 +738,9 @@ threshold_banner = (
     """
 )
 
+
 CUSTOM_CSS = r"""
+
 :root {
     --fad-bg: #070912;
     --fad-bg2: #0b0e19;
@@ -2308,559 +2314,126 @@ body {
     .detector-light-panel { padding: 10px; }
     #artwork-upload { min-height: 235px !important; }
 }
+
 """
+# ---------------- Streamlit hosting layer (original visual design preserved) ----------------
+st.set_page_config(page_title="FakeArt Detector", page_icon="🎨", layout="wide", initial_sidebar_state="collapsed")
 
-theme = gr.themes.Soft(
-    primary_hue=gr.themes.colors.rose,
-    secondary_hue=gr.themes.colors.slate,
-    neutral_hue=gr.themes.colors.slate,
-    radius_size=gr.themes.sizes.radius_lg,
-    spacing_size=gr.themes.sizes.spacing_md,
-    text_size=gr.themes.sizes.text_md,
-).set(
-    body_background_fill="#080a12",
-    body_text_color="#f8fafc",
-    background_fill_primary="rgba(15,18,30,0.80)",
-    background_fill_secondary="rgba(10,13,24,0.80)",
-    border_color_primary="rgba(255,255,255,0.10)",
-    button_primary_background_fill="linear-gradient(135deg, #f43f5e, #e11d48)",
-    button_primary_background_fill_hover="linear-gradient(135deg, #fb7185, #e11d48)",
-    button_primary_text_color="white",
-)
+_CALIBRATION_DETAILS = _load_calibration_details()
+_CALIBRATION_ACCURACY = _CALIBRATION_DETAILS.get("calibration_accuracy")
+_BALANCED_ACCURACY = _CALIBRATION_DETAILS.get("balanced_accuracy")
+CALIBRATION_ACCURACY_TEXT = f"{float(_CALIBRATION_ACCURACY) * 100:.0f}%" if isinstance(_CALIBRATION_ACCURACY, (int, float)) else "97%"
+BALANCED_ACCURACY_TEXT = f"{float(_BALANCED_ACCURACY) * 100:.1f}%" if isinstance(_BALANCED_ACCURACY, (int, float)) else "96.8%"
+HERO_ART_URI = _asset_data_uri("assets/hero_art_cards.png")
+HERO_ART_IMAGE_HTML = f'<img class="fad-art-preview-img" src="{HERO_ART_URI}" alt="Original and fake artwork comparison preview">' if HERO_ART_URI else '<div class="fad-css-art-preview"><span class="fad-chip original">ORIGINAL</span><span class="fad-chip fake">FAKE</span></div>'
+threshold_banner = '<div class="status-badge success-badge"><span>✓</span> Calibrated threshold active.</div>' if THRESHOLD_IS_CALIBRATED else f'<div class="status-badge warning-badge"><span>⚠</span> Default threshold active: <strong>{FAKE_THRESHOLD:.6f}</strong></div>'
 
-MOBILE_HEAD = """
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-<style>
-    html {
-        font-size: 16px !important;
-        scroll-behavior: smooth;
-        -webkit-text-size-adjust: 100% !important;
-        text-size-adjust: 100% !important;
-    }
-    @media screen and (max-width: 640px) {
-        html { font-size: 14px !important; }
-    }
-</style>
-"""
+st.markdown("<style>" + CUSTOM_CSS + "</style><style>" + r'''
+#MainMenu, footer, header { visibility:hidden; }
+.stApp { background:#070912 !important; }
+.block-container { max-width:1500px !important; padding:0 38px 28px 38px !important; }
+div[data-testid="stFileUploader"] { background:rgba(7,9,18,.74); border:1.8px dashed rgba(244,63,94,.70); border-radius:17px; padding:12px; }
+div[data-testid="stFileUploader"] label { color:#fb7185 !important; font-weight:850 !important; }
+.stTextArea textarea { background:rgba(255,255,255,.06) !important; color:#f8fafc !important; border-color:rgba(255,255,255,.12) !important; border-radius:14px !important; }
+.stTextArea label { color:#fb7185 !important; font-weight:850 !important; }
+.stButton > button { min-height:48px; border-radius:13px; font-weight:900; }
+</style>''', unsafe_allow_html=True)
 
-APP_JS = r"""
-() => {
-    const pages = ["home", "detector", "how", "about", "dataset", "team", "contact"];
+page = st.query_params.get("page", "home")
+if page not in {"home","detector","how","about","dataset","team","contact"}:
+    page = "home"
 
-    function routeToHash() {
-        let page = (window.location.hash || "#home").replace("#", "").trim();
-        if (!pages.includes(page)) page = "home";
+def nav_link(label, target, active=False):
+    cls = "fad-nav-link active" if active else "fad-nav-link"
+    return f'<a class="{cls}" href="?page={target}">{label}</a>'
 
-        pages.forEach((name) => {
-            const el = document.getElementById(`${name}-page`);
-            if (el) {
-                el.style.display = name === page ? "block" : "none";
-            }
-        });
+st.markdown(f'''
+<div class="fad-shell"><nav class="fad-navbar">
+<a class="fad-brand" href="?page=home"><span class="fad-logo-mark">⌾</span><span><span class="accent">FakeArt</span> Detector</span></a>
+<div class="fad-navlinks">{nav_link("Home","home",page=="home")}{nav_link("About","about",page=="about")}{nav_link("How It Works","how",page=="how")}{nav_link("Dataset","dataset",page=="dataset")}{nav_link("Team","team",page=="team")}{nav_link("Contact","contact",page=="contact")}</div>
+<a class="fad-nav-cta" href="?page=detector">Try Detector</a></nav></div>
+''', unsafe_allow_html=True)
 
-        document.querySelectorAll(".fad-nav-link").forEach((link) => {
-            link.classList.toggle("active", link.getAttribute("href") === `#${page}`);
-        });
+if page == "home":
+    st.markdown(f'''
+<main class="fad-shell"><section class="fad-home-hero"><div class="fad-home-grid"><div>
+<h1 class="fad-home-title">Detect <span class="accent">Fake</span> Art.<br>Trust Real Creativity.</h1>
+<p class="fad-home-subtitle">FakeArt Detector uses advanced AI models that combine visual analysis, semantic understanding, and image-text reasoning to identify forged or manipulated digital artworks.</p>
+<div class="fad-home-actions"><a class="fad-primary-link" href="?page=detector">Try FakeArt Detector <span>➜</span></a><a class="fad-secondary-link" href="?page=how">Learn How It Works <span>▷</span></a></div>
+<div class="status-wrapper">{threshold_banner}</div><div class="fad-stats">
+<div><div class="fad-stat-icon">▧</div><div class="fad-stat-value">2.5K+</div><div class="fad-stat-label">Artwork Images</div></div>
+<div><div class="fad-stat-icon">◎</div><div class="fad-stat-value">{CALIBRATION_ACCURACY_TEXT}</div><div class="fad-stat-label">Calibration Accuracy</div></div>
+<div><div class="fad-stat-icon">◫</div><div class="fad-stat-value">{BALANCED_ACCURACY_TEXT}</div><div class="fad-stat-label">Balanced Accuracy</div></div>
+<div><div class="fad-stat-icon">ϟ</div><div class="fad-stat-value">Multi-Modal Analysis</div><div class="fad-stat-label">LLaVA</div></div></div></div>
+<div class="fad-home-test-card"><h2 class="fad-home-test-title">Test Your Artwork</h2><p class="fad-home-test-subtitle">Upload an artwork image to check its authenticity.</p><div class="fad-home-test-body"><div><a class="fad-mock-upload" href="?page=detector"><div><div class="fad-upload-icon">☁</div><strong>Drag &amp; drop your image here<br>or click to browse</strong><small>Supports: JPG, PNG, WEBP</small></div></a><div class="fad-sample-divider">or</div><a class="fad-sample-btn" href="?page=detector">▧ Try Sample Artwork</a><div class="fad-secure-note">▣ Your images are secure and never stored.</div></div><div class="fad-art-preview-wrap">{HERO_ART_IMAGE_HTML}</div></div></div></div></section>
+<section class="fad-feature-section"><div class="fad-section-heading"><div class="fad-section-kicker">Why FakeArt Detector?</div><h2 class="fad-section-title">Advanced Multi-Modal Analysis</h2><p class="fad-section-subtitle">Combining multiple AI techniques for comprehensive artwork analysis.</p></div><div class="fad-feature-grid">
+<div class="fad-feature-card"><div class="fad-feature-icon">◉</div><h3>Visual Analysis</h3><p>Extracts patterns, textures and visual inconsistencies.</p></div><div class="fad-feature-card"><div class="fad-feature-icon">♧</div><h3>Semantic Understanding</h3><p>Understands the meaning and context behind artwork content.</p></div><div class="fad-feature-card"><div class="fad-feature-icon">▤</div><h3>Image-Text Reasoning</h3><p>Compares visual content with textual descriptions.</p></div><div class="fad-feature-card"><div class="fad-feature-icon">▦</div><h3>Pixel-Level Inspection</h3><p>Checks brightness, contrast, sharpness, noise and colorfulness.</p></div><div class="fad-feature-card"><div class="fad-feature-icon">♢</div><h3>Forgery Detection</h3><p>Returns Original or Fake verdict with research score details.</p></div>
+</div></section></main>''', unsafe_allow_html=True)
 
-        const cta = document.querySelector(".fad-nav-cta");
-        if (cta) {
-            cta.classList.toggle("active", page === "detector");
-        }
+elif page == "detector":
+    st.markdown('<div class="detector-light-wrap"><div class="detector-light-panel">', unsafe_allow_html=True)
+    left, right = st.columns([5, 6], gap="large")
+    with left:
+        st.markdown('<div class="detector-card"><h3 class="detector-card-title">Upload Artwork</h3><p class="detector-card-subtitle">Upload one artwork image to analyze its visual and semantic characteristics. You may also add an optional description to support the interpretation.</p>', unsafe_allow_html=True)
+        uploaded = st.file_uploader("Artwork image", type=["jpg","jpeg","png","webp"], label_visibility="collapsed", key="artwork-upload")
+        image_input = Image.open(uploaded).convert("RGB") if uploaded else None
+        if image_input is not None:
+            st.image(image_input, use_container_width=True)
+        user_description = st.text_area("Optional artwork description", placeholder="Describe the artwork, objects, background, style, colors or composition. Leave this field empty for image-only analysis.", height=140)
+        c1, c2 = st.columns([2,1])
+        with c1: check = st.button("Check Artwork", type="primary", use_container_width=True)
+        with c2: clear = st.button("Clear", use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="detector-card"><h3 class="detector-card-title">Analysis Result</h3><p class="detector-card-subtitle">The system verdict and model-generated interpretation will appear below after analysis.</p>', unsafe_allow_html=True)
+        if clear:
+            for k in ["result","system_description","match","pixel","reasons","technical"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+        if check:
+            if image_input is None:
+                st.error("Please upload an artwork image first.")
+            else:
+                with st.spinner("Analyzing artwork..."):
+                    try:
+                        vals = run_prediction(image_input, user_description)
+                        for k, v in zip(["result","system_description","match","pixel","reasons","technical"], vals):
+                            st.session_state[k] = v
+                    except PredictionError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        traceback.print_exc()
+                        st.error(f"Prediction failed: {e}")
+        result = st.session_state.get("result", "## Ready for Artwork Analysis\n\nUpload an artwork image and click **Check Artwork** to begin.")
+        st.markdown(f'<div id="verdict-card">{result}</div>', unsafe_allow_html=True)
+        st.text_area("System-generated visual description", value=st.session_state.get("system_description",""), height=140, disabled=True)
+        st.text_area("Description consistency", value=st.session_state.get("match",""), height=110, disabled=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+    tabs = st.tabs(["Pixel-level Analysis", "Prediction Reasons", "Important Information"])
+    with tabs[0]: st.text_area("Pixel statistics and observations", value=st.session_state.get("pixel",""), height=250, disabled=True)
+    with tabs[1]: st.text_area("Prediction reasons", value=st.session_state.get("reasons",""), height=220, disabled=True)
+    with tabs[2]:
+        st.markdown("""### About the Analysis
+- The **Verdict** is determined from model scores and the configured fake-threshold.
+- The **System-generated description** is created automatically from the uploaded image.
+- The **Description consistency** result is supplementary and does not override the main verdict.
+- The displayed confidence is a heuristic score for research interpretation, not a calibrated legal probability.
+- This application is a research prototype developed within an academic project environment.""")
+    with st.expander("Advanced Technical Details", expanded=False):
+        st.json(st.session_state.get("technical", {}))
 
-        window.scrollTo({ top: 0, behavior: "smooth" });
-    }
+else:
+    pages = {
+      "how": ("Workflow", "How It Works", "A simple process designed for academic research and demonstration.", [("1","Upload Artwork","Provide one clear digital artwork image for analysis."),("2","Generate Description","The model creates a description of objects, style, background and composition."),("3","Analyze Features","The system checks semantic evidence, label scores and pixel-level observations."),("4","Receive Verdict","Output includes Original/Fake verdict, reasons and technical scores.")]),
+      "about": ("About", "FakeArt Detector", "FakeArt Detector is an academic research prototype for detecting original and manipulated digital artworks using visual, semantic and pixel-level evidence.", [("","Purpose","Support research-based authenticity prediction for artwork images."),("","Model","LLaVA-1.5-7B with LoRA fine-tuning for multimodal reasoning."),("","Output","Verdict, description, consistency report, pixel evidence and technical details.")]),
+      "dataset": ("Dataset", "Research Dataset Context", "Prepared with paired original and fake artwork images for binary authenticity prediction.", [("","Total Images","2,500+ artwork images used in the project context."),("","Classes","Original artwork and fake/manipulated artwork."),("","Description","Every artwork image includes a description to support image-text reasoning and semantic analysis.")]),
+      "team": ("Team", "Final Year Design Project", "Academic research prototype developed for fake artwork detection using multimodal AI.", [("","Built by","MD. Moshiur Rahman<br>MD. Farhan Sadik Shihab"),("","Supervisor","Mr. Syed Eftasum Alam<br>Lecturer"),("","Project","FakeArt Detector · Final Year Design Project")]),
+      "contact": ("Contact", "Project Contact", "Project team, supervisor and contact information for FakeArt Detector.", [("","Built by","MD. Moshiur Rahman<br>MD. Farhan Sadik Shihab"),("","Supervisor","Mr. Syed Eftasum Alam"),("","Email","fakeart.detector.bd@gmail.com")])}
+    kicker, title, subtitle, cards = pages[page]
+    card_class = "fad-process-card" if page == "how" else "fad-dark-card"
+    grid = "fad-process-grid" if page == "how" else "fad-info-grid"
+    cards_html = ''.join(f'<div class="{card_class}"><div class="fad-step-number">{a}</div><h3>{b}</h3><p>{c}</p></div>' if page == "how" else f'<div class="{card_class}"><h3>{b}</h3><p>{c}</p></div>' for a,b,c in cards)
+    st.markdown(f'<main class="fad-shell fad-page-pad"><section class="fad-page-panel"><div class="fad-section-heading"><div class="fad-section-kicker">{kicker}</div><h2 class="fad-section-title">{title}</h2><p class="fad-section-subtitle">{subtitle}</p></div><div class="{grid}">{cards_html}</div></section></main>', unsafe_allow_html=True)
 
-    window.addEventListener("hashchange", routeToHash);
-    setTimeout(routeToHash, 80);
-    setTimeout(routeToHash, 400);
-    setTimeout(routeToHash, 1000);
-}
-"""
-
-
-with gr.Blocks(
-    title="FakeArt Detector",
-    theme=theme,
-    css=CUSTOM_CSS,
-    head=MOBILE_HEAD,
-    fill_width=True,
-    js=APP_JS,
-) as demo:
-    gr.HTML(
-        """
-        <div class="fad-shell">
-            <nav class="fad-navbar">
-                <a class="fad-brand" href="#home">
-                    <span class="fad-logo-mark">⌾</span>
-                    <span><span class="accent">FakeArt</span> Detector</span>
-                </a>
-                <div class="fad-navlinks">
-                    <a class="fad-nav-link active" href="#home">Home</a>
-                    <a class="fad-nav-link" href="#about">About</a>
-                    <a class="fad-nav-link" href="#how">How It Works</a>
-                    <a class="fad-nav-link" href="#dataset">Dataset</a>
-                    <a class="fad-nav-link" href="#team">Team</a>
-                    <a class="fad-nav-link" href="#contact">Contact</a>
-                </div>
-                <a class="fad-nav-cta" href="#detector">Try Detector</a>
-            </nav>
-        </div>
-        """
-    )
-
-    # ----------------------------- HOME PAGE -----------------------------
-    with gr.Group(elem_id="home-page", elem_classes=["fad-page"]):
-        gr.HTML(
-            f"""
-            <main class="fad-shell">
-                <section class="fad-home-hero">
-                    <div class="fad-home-grid">
-                        <div>
-                            <h1 class="fad-home-title">Detect <span class="accent">Fake</span> Art.<br>Trust Real Creativity.</h1>
-                            <p class="fad-home-subtitle">
-                                FakeArt Detector uses advanced AI models that combine visual analysis,
-                                semantic understanding, and image-text reasoning to identify forged
-                                or manipulated digital artworks.
-                            </p>
-                            <div class="fad-home-actions">
-                                <a class="fad-primary-link" href="#detector">Try FakeArt Detector <span>➜</span></a>
-                                <a class="fad-secondary-link" href="#how">Learn How It Works <span>▷</span></a>
-                            </div>
-                            <div class="status-wrapper">{threshold_banner}</div>
-                            <div class="fad-stats">
-                                <div>
-                                    <div class="fad-stat-icon">▧</div>
-                                    <div class="fad-stat-value">2.5K+</div>
-                                    <div class="fad-stat-label">Artwork Images</div>
-                                </div>
-                                <div>
-                                    <div class="fad-stat-icon">◎</div>
-                                    <div class="fad-stat-value">{CALIBRATION_ACCURACY_TEXT}</div>
-                                    <div class="fad-stat-label">Calibration Accuracy</div>
-                                </div>
-                                <div>
-                                    <div class="fad-stat-icon">◫</div>
-                                    <div class="fad-stat-value">{BALANCED_ACCURACY_TEXT}</div>
-                                    <div class="fad-stat-label">Balanced Accuracy</div>
-                                </div>
-                                <div>
-                                    <div class="fad-stat-icon">ϟ</div>
-                                    <div class="fad-stat-value">Multi-Modal Analysis</div>
-                                    <div class="fad-stat-label">LLaVA</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="fad-home-test-card">
-                            <h2 class="fad-home-test-title">Test Your Artwork</h2>
-                            <p class="fad-home-test-subtitle">Upload an artwork image to check its authenticity.</p>
-                            <div class="fad-home-test-body">
-                                <div>
-                                    <a class="fad-mock-upload" href="#detector">
-                                        <div>
-                                            <div class="fad-upload-icon">☁</div>
-                                            <strong>Drag & drop your image here<br>or click to browse</strong>
-                                            <small>Supports: JPG, PNG, WEBP</small>
-                                        </div>
-                                    </a>
-                                    <div class="fad-sample-divider">or</div>
-                                    <a class="fad-sample-btn" href="#detector">▧ Try Sample Artwork</a>
-                                    <div class="fad-secure-note">▣ Your images are secure and never stored.</div>
-                                </div>
-                                <div class="fad-art-preview-wrap">
-                                    {HERO_ART_IMAGE_HTML}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="fad-feature-section">
-                    <div class="fad-section-heading">
-                        <div class="fad-section-kicker">Why FakeArt Detector?</div>
-                        <h2 class="fad-section-title">Advanced Multi-Modal Analysis</h2>
-                        <p class="fad-section-subtitle">Combining multiple AI techniques for comprehensive artwork analysis.</p>
-                    </div>
-                    <div class="fad-feature-grid">
-                        <div class="fad-feature-card">
-                            <div class="fad-feature-icon">◉</div>
-                            <h3>Visual Analysis</h3>
-                            <p>Extracts patterns, textures and visual inconsistencies.</p>
-                        </div>
-                        <div class="fad-feature-card">
-                            <div class="fad-feature-icon">♧</div>
-                            <h3>Semantic Understanding</h3>
-                            <p>Understands the meaning and context behind artwork content.</p>
-                        </div>
-                        <div class="fad-feature-card">
-                            <div class="fad-feature-icon">▤</div>
-                            <h3>Image-Text Reasoning</h3>
-                            <p>Compares visual content with textual descriptions.</p>
-                        </div>
-                        <div class="fad-feature-card">
-                            <div class="fad-feature-icon">▦</div>
-                            <h3>Pixel-Level Inspection</h3>
-                            <p>Checks brightness, contrast, sharpness, noise and colorfulness.</p>
-                        </div>
-                        <div class="fad-feature-card">
-                            <div class="fad-feature-icon">♢</div>
-                            <h3>Forgery Detection</h3>
-                            <p>Returns Original or Fake verdict with research score details.</p>
-                        </div>
-                    </div>
-                </section>
-            </main>
-            """
-        )
-
-    # ----------------------------- DETECTOR PAGE -----------------------------
-    with gr.Group(elem_id="detector-page", elem_classes=["fad-page"]):
-        with gr.Group(elem_classes=["detector-light-wrap"]):
-            with gr.Group(elem_classes=["detector-light-panel"]):
-                with gr.Row(equal_height=True, elem_id="detector-main-row"):
-                    with gr.Column(scale=5):
-                        with gr.Group(elem_classes=["detector-card"]):
-                            gr.HTML(
-                                """
-                                <h3 class="detector-card-title">Upload Artwork</h3>
-                                <p class="detector-card-subtitle">
-                                    Upload one artwork image to analyze its visual and semantic characteristics.
-                                    You may also add an optional description to support the interpretation.
-                                </p>
-                                """
-                            )
-
-                            image_input = gr.Image(
-                                type="pil",
-                                label="Artwork image",
-                                show_label=False,
-                                height=300,
-                                sources=["upload", "clipboard", "webcam"],
-                                elem_id="artwork-upload",
-                            )
-
-                            description_input = gr.Textbox(
-                                label="Optional artwork description",
-                                placeholder=(
-                                    "Describe the artwork, objects, background, style, colors or composition. "
-                                    "Leave this field empty for image-only analysis."
-                                ),
-                                lines=5,
-                                max_lines=8,
-                                elem_classes=["output-box"],
-                            )
-
-                            with gr.Row():
-                                predict_button = gr.Button(
-                                    "Check Artwork",
-                                    variant="primary",
-                                    scale=2,
-                                    elem_classes=["detector-check-button"],
-                                )
-                                clear_button = gr.Button(
-                                    "Clear",
-                                    variant="secondary",
-                                    scale=1,
-                                    elem_classes=["detector-clear-button"],
-                                )
-
-                    with gr.Column(scale=6):
-                        with gr.Group(elem_classes=["detector-card"]):
-                            gr.HTML(
-                                """
-                                <h3 class="detector-card-title">Analysis Result</h3>
-                                <p class="detector-card-subtitle">
-                                    The system verdict and model-generated interpretation will appear below after analysis.
-                                </p>
-                                """
-                            )
-
-                            result_output = gr.Markdown(
-                                value=(
-                                    "## Ready for Artwork Analysis\n\n"
-                                    "Upload an artwork image and click **Check Artwork** to begin."
-                                ),
-                                elem_id="verdict-card",
-                            )
-
-                            system_description_output = gr.Textbox(
-                                label="System-generated visual description",
-                                placeholder="The model-generated artwork description will appear here.",
-                                lines=5,
-                                max_lines=8,
-                                interactive=False,
-                                elem_classes=["output-box"],
-                            )
-
-                            match_output = gr.Textbox(
-                                label="Description consistency",
-                                placeholder=(
-                                    "If you provide a description, the comparison between your text "
-                                    "and the system-generated description will appear here."
-                                ),
-                                lines=4,
-                                max_lines=7,
-                                interactive=False,
-                                elem_classes=["output-box"],
-                            )
-
-                with gr.Tabs(elem_classes=["analysis-tabs"]):
-                    with gr.Tab("Pixel-level Analysis"):
-                        pixel_output = gr.Textbox(
-                            label="Pixel statistics and observations",
-                            placeholder=(
-                                "Brightness, contrast, sharpness, noise, edges and other pixel-level observations will appear here."
-                            ),
-                            lines=10,
-                            max_lines=15,
-                            interactive=False,
-                            elem_classes=["output-box"],
-                        )
-
-                    with gr.Tab("Prediction Reasons"):
-                        reasons_output = gr.Textbox(
-                            label="Prediction reasons",
-                            placeholder="The explanation supporting the Original or Fake verdict will appear here.",
-                            lines=9,
-                            max_lines=14,
-                            interactive=False,
-                            elem_classes=["output-box"],
-                        )
-
-                    with gr.Tab("Important Information"):
-                        gr.Markdown(
-                            """
-                            ### About the Analysis
-
-                            - The **Verdict** is determined from model scores and the configured fake-threshold.
-                            - The **System-generated description** is created automatically from the uploaded image.
-                            - The **Description consistency** result is supplementary and does not override the main verdict.
-                            - The displayed confidence is a heuristic score for research interpretation, not a calibrated legal probability.
-                            - This application is a research prototype developed within an academic project environment.
-                            """,
-                            elem_classes=["important-info"],
-                        )
-
-                with gr.Accordion("Advanced Technical Details", open=False, elem_classes=["technical-section"]):
-                    technical_output = gr.JSON(label="Technical output")
-
-    # ----------------------------- HOW PAGE -----------------------------
-    with gr.Group(elem_id="how-page", elem_classes=["fad-page"]):
-        gr.HTML(
-            """
-            <main class="fad-shell fad-page-pad">
-                <section class="fad-page-panel">
-                    <div class="fad-section-heading">
-                        <div class="fad-section-kicker">Workflow</div>
-                        <h2 class="fad-section-title">How It Works</h2>
-                        <p class="fad-section-subtitle">
-                            A simple process designed for academic research and demonstration.
-                        </p>
-                    </div>
-                    <div class="fad-process-grid">
-                        <div class="fad-process-card">
-                            <div class="fad-step-number">1</div>
-                            <h3>Upload Artwork</h3>
-                            <p>Provide one clear digital artwork image for analysis.</p>
-                        </div>
-                        <div class="fad-process-card">
-                            <div class="fad-step-number">2</div>
-                            <h3>Generate Description</h3>
-                            <p>The model creates a description of objects, style, background and composition.</p>
-                        </div>
-                        <div class="fad-process-card">
-                            <div class="fad-step-number">3</div>
-                            <h3>Analyze Features</h3>
-                            <p>The system checks semantic evidence, label scores and pixel-level observations.</p>
-                        </div>
-                        <div class="fad-process-card">
-                            <div class="fad-step-number">4</div>
-                            <h3>Receive Verdict</h3>
-                            <p>Output includes Original/Fake verdict, reasons and technical scores.</p>
-                        </div>
-                    </div>
-                </section>
-            </main>
-            """
-        )
-
-    # ----------------------------- ABOUT PAGE -----------------------------
-    with gr.Group(elem_id="about-page", elem_classes=["fad-page"]):
-        gr.HTML(
-            """
-            <main class="fad-shell fad-page-pad">
-                <section class="fad-page-panel">
-                    <div class="fad-section-heading">
-                        <div class="fad-section-kicker">About</div>
-                        <h2 class="fad-section-title">FakeArt Detector</h2>
-                        <p class="fad-section-subtitle">
-                            FakeArt Detector is an academic research prototype for detecting original and manipulated
-                            digital artworks using visual, semantic and pixel-level evidence.
-                        </p>
-                    </div>
-                    <div class="fad-info-grid">
-                        <div class="fad-dark-card">
-                            <h3>Purpose</h3>
-                            <p>Support research-based authenticity prediction for artwork images.</p>
-                        </div>
-                        <div class="fad-dark-card">
-                            <h3>Model</h3>
-                            <p>LLaVA-1.5-7B with LoRA fine-tuning for multimodal reasoning.</p>
-                        </div>
-                        <div class="fad-dark-card">
-                            <h3>Output</h3>
-                            <p>Verdict, description, consistency report, pixel evidence and technical details.</p>
-                        </div>
-                    </div>
-                </section>
-            </main>
-            """
-        )
-
-    # ----------------------------- DATASET PAGE -----------------------------
-    with gr.Group(elem_id="dataset-page", elem_classes=["fad-page"]):
-        gr.HTML(
-            """
-            <main class="fad-shell fad-page-pad">
-                <section class="fad-page-panel">
-                    <div class="fad-section-heading">
-                        <div class="fad-section-kicker">Dataset</div>
-                        <h2 class="fad-section-title">Research Dataset Context</h2>
-                        <p class="fad-section-subtitle">
-                            Prepared with paired original and fake artwork images for binary authenticity prediction.
-                        </p>
-                    </div>
-                    <div class="fad-info-grid">
-                        <div class="fad-dark-card">
-                            <h3>Total Images</h3>
-                            <p>2,500+ artwork images used in the project context.</p>
-                        </div>
-                        <div class="fad-dark-card">
-                            <h3>Classes</h3>
-                            <p>Original artwork and fake/manipulated artwork.</p>
-                        </div>
-                        <div class="fad-dark-card">
-                            <h3>Description</h3>
-                            <p>Every artwork image includes a description to support image-text reasoning and semantic analysis.</p>
-                        </div>
-                    </div>
-                </section>
-            </main>
-            """
-        )
-
-    # ----------------------------- TEAM PAGE -----------------------------
-    with gr.Group(elem_id="team-page", elem_classes=["fad-page"]):
-        gr.HTML(
-            """
-            <main class="fad-shell fad-page-pad">
-                <section class="fad-page-panel">
-                    <div class="fad-section-heading">
-                        <div class="fad-section-kicker">Team</div>
-                        <h2 class="fad-section-title">Final Year Design Project</h2>
-                        <p class="fad-section-subtitle">
-                            Academic research prototype developed for fake artwork detection using multimodal AI.
-                        </p>
-                    </div>
-                    <div class="fad-info-grid">
-                        <div class="fad-dark-card">
-                            <h3>Built by</h3>
-                            <p>MD. Moshiur Rahman<br>MD. Farhan Sadik Shihab</p>
-                        </div>
-                        <div class="fad-dark-card">
-                            <h3>Supervisor</h3>
-                            <p>Mr. Syed Eftasum Alam<br>Lecturer</p>
-                        </div>
-                        <div class="fad-dark-card">
-                            <h3>Project</h3>
-                            <p>FakeArt Detector · Final Year Design Project</p>
-                        </div>
-                    </div>
-                </section>
-            </main>
-            """
-        )
-
-    # ----------------------------- CONTACT PAGE -----------------------------
-    with gr.Group(elem_id="contact-page", elem_classes=["fad-page"]):
-        gr.HTML(
-            """
-            <main class="fad-shell fad-page-pad">
-                <section class="fad-page-panel">
-                    <div class="fad-section-heading">
-                        <div class="fad-section-kicker">Contact</div>
-                        <h2 class="fad-section-title">Project Contact</h2>
-                        <p class="fad-section-subtitle">
-                            Project team, supervisor and contact information for FakeArt Detector.
-                        </p>
-                    </div>
-                    <div class="fad-info-grid">
-                        <div class="fad-contact-card">
-                            <h3>Built by</h3>
-                            <p>MD. Moshiur Rahman<br>MD. Farhan Sadik Shihab</p>
-                        </div>
-                        <div class="fad-contact-card">
-                            <h3>Supervisor</h3>
-                            <p>Mr. Syed Eftasum Alam</p>
-                        </div>
-                        <div class="fad-contact-card">
-                            <h3>Email</h3>
-                            <p>fakeart.detector.bd@gmail.com</p>
-                        </div>
-                    </div>
-                </section>
-            </main>
-            """
-        )
-
-    gr.HTML(
-        """
-        <footer class="custom-footer">
-            <strong>FakeArt Detector</strong><br>
-            Built by MD. Moshiur Rahman and MD. Farhan Sadik Shihab<br>
-            Final Year Design Project · Academic Research Prototype<br>
-            LLaVA-1.5-7B with LoRA Fine-Tuning
-        </footer>
-        """
-    )
-
-    predict_button.click(
-        fn=run_prediction,
-        inputs=[image_input, description_input],
-        outputs=[
-            result_output,
-            system_description_output,
-            match_output,
-            pixel_output,
-            reasons_output,
-            technical_output,
-        ],
-        api_name="check_artwork",
-    )
-
-    clear_button.click(
-        fn=clear_outputs,
-        inputs=[],
-        outputs=[
-            image_input,
-            description_input,
-            result_output,
-            system_description_output,
-            match_output,
-            pixel_output,
-            reasons_output,
-            technical_output,
-        ],
-    )
-
-
-demo.queue(default_concurrency_limit=1, max_size=8)
-
-if __name__ == "__main__":
-    demo.launch(
-    server_name="0.0.0.0",
-    server_port=7860
-)
+st.markdown('<footer class="custom-footer"><strong>FakeArt Detector</strong><br>Built by MD. Moshiur Rahman and MD. Farhan Sadik Shihab<br>Final Year Design Project · Academic Research Prototype<br>LLaVA-1.5-7B with LoRA Fine-Tuning</footer>', unsafe_allow_html=True)
