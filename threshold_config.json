@@ -1,0 +1,6 @@
+{
+  "fake_threshold": 3.327479362487793,
+  "calibrated": true,
+  "calibration_accuracy": 0.97,
+  "balanced_accuracy": 0.968
+}
